@@ -46,33 +46,6 @@ jobs:
           ignore-unfixed: true
           severity: CRITICAL,HIGH
 
-      - name: Debug OIDC claims
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-        shell: bash
-        run: |
-          TOKEN_JSON=$(curl -s \
-            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com")
-
-          ID_TOKEN=$(echo "$TOKEN_JSON" | jq -r '.value')
-
-          echo "OIDC claims:"
-          echo "$ID_TOKEN" | jq -R '
-            split(".")[1]
-            | @base64d
-            | fromjson
-            | {
-                aud,
-                sub,
-                repository,
-                repository_id,
-                repository_owner,
-                repository_owner_id,
-                ref,
-                event_name
-              }
-          '
-
       - name: Configure AWS credentials
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         uses: aws-actions/configure-aws-credentials@v6
