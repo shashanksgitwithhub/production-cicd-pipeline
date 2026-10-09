@@ -1,4 +1,4 @@
-name: CI Pipeline
+name: CI/CD Pipeline
 
 on:
   push:
@@ -12,9 +12,13 @@ permissions:
   contents: read
   id-token: write
 
-jobs:
-  test:
+env:
+  AWS_REGION: ap-south-2
+  ECR_REPOSITORY: production-cicd-pipeline
+  EC2_INSTANCE_ID: i-03ece06427a7fa0d8
 
+jobs:
+  test-and-build:
     runs-on: ubuntu-latest
 
     steps:
@@ -51,7 +55,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: arn:aws:iam::470829880485:role/GitHubActions-ECR-ProductionCICD
-          aws-region: ap-south-2
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
@@ -64,5 +68,71 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker tag production-cicd-pipeline:ci $ECR_REGISTRY/production-cicd-pipeline:$IMAGE_TAG
-          docker push $ECR_REGISTRY/production-cicd-pipeline:$IMAGE_TAG
+          docker tag production-cicd-pipeline:ci \
+            "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+      - name: Deploy to EC2 through SSM
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+          AWS_ACCOUNT_ID: "470829880485"
+        run: |
+          set -euo pipefail
+
+          IMAGE_URI="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG"
+
+          COMMAND_ID=$(aws ssm send-command \
+            --region "$AWS_REGION" \
+            --instance-ids "$EC2_INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "Deploy $IMAGE_TAG from GitHub Actions" \
+            --parameters "$(jq -nc --arg image "$IMAGE_URI" \
+              '{commands: [
+                "set -eu",
+                "IMAGE_URI=\u0027" + $image + "\u0027",
+                "aws ecr get-login-password --region ap-south-2 | docker login --username AWS --password-stdin 470829880485.dkr.ecr.ap-south-2.amazonaws.com",
+                "docker pull \"$IMAGE_URI\"",
+                "docker stop production-cicd-app || true",
+                "docker rm production-cicd-app || true",
+                "docker run -d --name production-cicd-app --restart unless-stopped -p 127.0.0.1:5000:5000 \"$IMAGE_URI\"",
+                "sleep 3",
+                "curl --fail --silent http://127.0.0.1:5000/health"
+              ]}') " \
+            --query "Command.CommandId" \
+            --output text)
+
+          echo "SSM command ID: $COMMAND_ID"
+
+          for attempt in $(seq 1 30); do
+            STATUS=$(aws ssm get-command-invocation \
+              --region "$AWS_REGION" \
+              --command-id "$COMMAND_ID" \
+              --instance-id "$EC2_INSTANCE_ID" \
+              --query "Status" \
+              --output text 2>/dev/null || true)
+
+            echo "Deployment status: ${STATUS:-Pending}"
+
+            case "$STATUS" in
+              Success)
+                echo "Deployment command succeeded."
+                exit 0
+                ;;
+              Failed|Cancelled|TimedOut)
+                aws ssm get-command-invocation \
+                  --region "$AWS_REGION" \
+                  --command-id "$COMMAND_ID" \
+                  --instance-id "$EC2_INSTANCE_ID" \
+                  --query "{Status:Status,Output:StandardOutputContent,Error:StandardErrorContent}" \
+                  --output json
+                exit 1
+                ;;
+            esac
+
+            sleep 5
+          done
+
+          echo "Timed out waiting for deployment command."
+          exit 1
