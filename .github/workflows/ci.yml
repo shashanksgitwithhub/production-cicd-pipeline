@@ -66,7 +66,7 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
+          IMAGE_TAG: ${{ github.sha }}-${{ github.run_attempt }}
         run: |
           docker tag production-cicd-pipeline:ci \
             "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
@@ -76,7 +76,7 @@ jobs:
       - name: Deploy to EC2 through SSM
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         env:
-          IMAGE_TAG: ${{ github.sha }}
+          IMAGE_TAG: ${{ github.sha }}-${{ github.run_attempt }}
           AWS_ACCOUNT_ID: "470829880485"
         run: |
           set -euo pipefail
