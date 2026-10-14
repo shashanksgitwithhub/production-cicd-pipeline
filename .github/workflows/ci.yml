@@ -73,7 +73,7 @@ jobs:
 
           docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
-            - name: Deploy to EC2 through SSM
+      - name: Deploy to EC2 through SSM
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         env:
           IMAGE_TAG: ${{ github.sha }}-${{ github.run_attempt }}
