@@ -73,7 +73,7 @@ jobs:
 
           docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
-      - name: Deploy to EC2 through SSM
+            - name: Deploy to EC2 through SSM
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         env:
           IMAGE_TAG: ${{ github.sha }}-${{ github.run_attempt }}
@@ -83,29 +83,60 @@ jobs:
 
           IMAGE_URI="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG"
 
+          COMMANDS=$(jq -nc --arg image "$IMAGE_URI" '{
+            commands: [
+              "set -eu",
+              "IMAGE_URI=\u0027" + $image + "\u0027",
+              "ECR_REGISTRY=470829880485.dkr.ecr.ap-south-2.amazonaws.com",
+              "aws ecr get-login-password --region ap-south-2 | docker login --username AWS --password-stdin \"$ECR_REGISTRY\"",
+              "docker pull \"$IMAGE_URI\"",
+
+              "OLD_IMAGE=$(docker inspect --format=\"{{.Config.Image}}\" production-cicd-app 2>/dev/null || true)",
+              "OLD_CONTAINER=$(docker ps -q --filter name=^production-cicd-app$ || true)",
+
+              "if [ -n \"$OLD_CONTAINER\" ]; then docker stop production-cicd-app; fi",
+              "docker rm -f production-cicd-app 2>/dev/null || true",
+
+              "if docker run -d --name production-cicd-app --restart unless-stopped -p 127.0.0.1:5000:5000 \"$IMAGE_URI\"; then",
+              "  HEALTHY=0",
+              "  for attempt in $(seq 1 12); do",
+              "    if curl --fail --silent http://127.0.0.1:5000/health; then HEALTHY=1; break; fi",
+              "    sleep 5",
+              "  done",
+              "  if [ \"$HEALTHY\" -eq 1 ]; then echo Deployment successful; exit 0; fi",
+              "fi",
+
+              "echo New deployment failed; attempting rollback",
+              "docker logs --tail 50 production-cicd-app 2>&1 || true",
+              "docker rm -f production-cicd-app 2>/dev/null || true",
+
+              "if [ -n \"$OLD_IMAGE\" ]; then",
+              "  if docker image inspect \"$OLD_IMAGE\" >/dev/null 2>&1 || docker pull \"$OLD_IMAGE\"; then",
+              "    docker run -d --name production-cicd-app --restart unless-stopped -p 127.0.0.1:5000:5000 \"$OLD_IMAGE\"",
+              "    for attempt in $(seq 1 12); do",
+              "      if curl --fail --silent http://127.0.0.1:5000/health; then echo Rollback successful; exit 1; fi",
+              "      sleep 5",
+              "    done",
+              "  fi",
+              "fi",
+
+              "echo Deployment and rollback failed; manual intervention required",
+              "exit 1"
+            ]
+          }')
+
           COMMAND_ID=$(aws ssm send-command \
             --region "$AWS_REGION" \
             --instance-ids "$EC2_INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
-            --comment "Deploy $IMAGE_TAG from GitHub Actions" \
-            --parameters "$(jq -nc --arg image "$IMAGE_URI" \
-              '{commands: [
-                "set -eu",
-                "IMAGE_URI=\u0027" + $image + "\u0027",
-                "aws ecr get-login-password --region ap-south-2 | docker login --username AWS --password-stdin 470829880485.dkr.ecr.ap-south-2.amazonaws.com",
-                "docker pull \"$IMAGE_URI\"",
-                "docker stop production-cicd-app || true",
-                "docker rm production-cicd-app || true",
-                "docker run -d --name production-cicd-app --restart unless-stopped -p 127.0.0.1:5000:5000 \"$IMAGE_URI\"",
-                "sleep 3",
-                "curl --fail --silent http://127.0.0.1:5000/health"
-              ]}') " \
+            --comment "Deploy $IMAGE_TAG with rollback support" \
+            --parameters "$COMMANDS" \
             --query "Command.CommandId" \
             --output text)
 
           echo "SSM command ID: $COMMAND_ID"
 
-          for attempt in $(seq 1 30); do
+          for attempt in $(seq 1 36); do
             STATUS=$(aws ssm get-command-invocation \
               --region "$AWS_REGION" \
               --command-id "$COMMAND_ID" \
@@ -117,7 +148,7 @@ jobs:
 
             case "$STATUS" in
               Success)
-                echo "Deployment command succeeded."
+                echo "Deployment completed successfully."
                 exit 0
                 ;;
               Failed|Cancelled|TimedOut)
