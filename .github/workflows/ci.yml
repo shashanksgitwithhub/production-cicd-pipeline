@@ -92,32 +92,34 @@ jobs:
               "docker pull \"$IMAGE_URI\"",
 
               "OLD_IMAGE=$(docker inspect --format=\"{{.Config.Image}}\" production-cicd-app 2>/dev/null || true)",
-              "OLD_CONTAINER=$(docker ps -q --filter name=^production-cicd-app$ || true)",
 
-              "if [ -n \"$OLD_CONTAINER\" ]; then docker stop production-cicd-app; fi",
-              "docker rm -f production-cicd-app 2>/dev/null || true",
+              "if [ -z \"$OLD_IMAGE\" ]; then echo No previous container image found; exit 1; fi",
 
+              "echo Previous image: $OLD_IMAGE",
+              "echo Stopping current application",
+              "docker stop production-cicd-app || true",
+              "docker rm -f production-cicd-app || true",
+
+              "HEALTHY=0",
               "if docker run -d --name production-cicd-app --restart unless-stopped -p 127.0.0.1:5000:5000 \"$IMAGE_URI\"; then",
-              "  HEALTHY=0",
               "  for attempt in $(seq 1 12); do",
               "    if curl --fail --silent http://127.0.0.1:5000/health; then HEALTHY=1; break; fi",
               "    sleep 5",
               "  done",
-              "  if [ \"$HEALTHY\" -eq 1 ]; then echo Deployment successful; exit 0; fi",
               "fi",
+
+              "if [ \"$HEALTHY\" -eq 1 ]; then echo New deployment healthy; exit 0; fi",
 
               "echo New deployment failed; attempting rollback",
               "docker logs --tail 50 production-cicd-app 2>&1 || true",
               "docker rm -f production-cicd-app 2>/dev/null || true",
 
-              "if [ -n \"$OLD_IMAGE\" ]; then",
-              "  if docker image inspect \"$OLD_IMAGE\" >/dev/null 2>&1 || docker pull \"$OLD_IMAGE\"; then",
-              "    docker run -d --name production-cicd-app --restart unless-stopped -p 127.0.0.1:5000:5000 \"$OLD_IMAGE\"",
-              "    for attempt in $(seq 1 12); do",
-              "      if curl --fail --silent http://127.0.0.1:5000/health; then echo Rollback successful; exit 1; fi",
-              "      sleep 5",
-              "    done",
-              "  fi",
+              "if docker image inspect \"$OLD_IMAGE\" >/dev/null 2>&1 || docker pull \"$OLD_IMAGE\"; then",
+              "  docker run -d --name production-cicd-app --restart unless-stopped -p 127.0.0.1:5000:5000 \"$OLD_IMAGE\"",
+              "  for attempt in $(seq 1 12); do",
+              "    if curl --fail --silent http://127.0.0.1:5000/health; then echo Rollback successful; exit 1; fi",
+              "    sleep 5",
+              "  done",
               "fi",
 
               "echo Deployment and rollback failed; manual intervention required",
